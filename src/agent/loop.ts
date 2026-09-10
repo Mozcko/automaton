@@ -37,6 +37,7 @@ import {
 import { sanitizeInput } from "./injection-defense.js";
 import { getSurvivalTier } from "../conway/credits.js";
 import { getUsdcBalance } from "../conway/x402.js";
+import { checkResources } from "../survival/monitor.js";
 import {
   claimInboxMessages,
   markInboxProcessed,
@@ -347,7 +348,7 @@ export async function runAgentLoop(
   onStateChange?.("waking");
 
   // Get financial state
-  let financial = await getFinancialState(conway, identity.address, db, config.chainType || identity.chainType || "evm");
+  let financial = (await checkResources(identity, conway, db)).financial;
 
   // Check if this is the first run
   const isFirstRun = db.getTurnCount() === 0;
@@ -446,7 +447,7 @@ Remember to use your tools by strictly outputting valid tool calls.`;
       }
 
       // Refresh financial state periodically
-      financial = await getFinancialState(conway, identity.address, db, config.chainType || identity.chainType || "evm");
+      financial = (await checkResources(identity, conway, db)).financial;
 
       // Check survival tier
       // api_unreachable: creditsCents === -1 means API failed with no cache.
@@ -481,7 +482,7 @@ Remember to use your tools by strictly outputting valid tool calls.`;
                 log(config, `[AUTO-TOPUP] Bought $${topupResult.amountUsd} credits from USDC mid-loop`);
                 // Re-fetch financial state after topup so the rest of
                 // the turn sees the updated balance.
-                financial = await getFinancialState(conway, identity.address, db, config.chainType || identity.chainType || "evm");
+                financial = (await checkResources(identity, conway, db)).financial;
               }
             } catch (err: any) {
               logger.warn(`Inline auto-topup failed: ${err.message}`);
@@ -959,92 +960,6 @@ Remember to use your tools by strictly outputting valid tool calls.`;
 // ─── Helpers ───────────────────────────────────────────────────
 
 // Cache last known good balances so transient API failures don't
-// cause the automaton to believe it has $0 and kill itself.
-let _lastKnownCredits = 0;
-let _lastKnownUsdc = 0;
-
-async function getFinancialState(
-  conway: ConwayClient,
-  address: string,
-  db?: AutomatonDatabase,
-  chainType?: string,
-): Promise<FinancialState> {
-  let creditsCents = _lastKnownCredits;
-  let usdcBalance = _lastKnownUsdc;
-
-  try {
-    
-    creditsCents = await conway.getCreditsBalance();
-    
-    // In local mode, deduct the internal total cost from the env balance
-    if (process.env.AUTOMATON_CREDITS_BALANCE) {
-      let totalSpent = 0;
-      if (db) {
-         try {
-             // Use dynamic import so we don't have to mess with top-level imports
-             const { inferenceGetTotalCost } = await import("../state/database.js");
-             totalSpent = inferenceGetTotalCost(db.raw) || 0;
-         } catch (e) {}
-      }
-      creditsCents = Number(process.env.AUTOMATON_CREDITS_BALANCE) - Math.floor(totalSpent);
-    }
-
-    if (creditsCents > 0) _lastKnownCredits = creditsCents;
-  } catch (error) {
-    logger.error("Credits balance fetch failed", error instanceof Error ? error : undefined);
-    // Use last known balance from KV, not zero
-    if (db) {
-      const cached = db.getKV("last_known_balance");
-      if (cached) {
-        try {
-          const parsed = JSON.parse(cached);
-          logger.warn("Balance API failed, using cached balance");
-          return {
-            creditsCents: parsed.creditsCents ?? 0,
-            usdcBalance: parsed.usdcBalance ?? 0,
-            lastChecked: new Date().toISOString(),
-          };
-        } catch (parseError) {
-          logger.error("Failed to parse cached balance", parseError instanceof Error ? parseError : undefined);
-        }
-      }
-    }
-    // No cache available -- return conservative non-zero sentinel
-    logger.error("Balance API failed, no cache available");
-    return {
-      creditsCents: -1,
-      usdcBalance: -1,
-      lastChecked: new Date().toISOString(),
-    };
-  }
-
-  try {
-    const network = chainType === "solana" ? "solana:mainnet" : "eip155:8453";
-    usdcBalance = await getUsdcBalance(address, network, chainType as any);
-    if (usdcBalance > 0) _lastKnownUsdc = usdcBalance;
-  } catch (error) {
-    logger.error("USDC balance fetch failed", error instanceof Error ? error : undefined);
-  }
-
-  // Cache successful balance reads
-  if (db) {
-    try {
-      db.setKV(
-        "last_known_balance",
-        JSON.stringify({ creditsCents, usdcBalance }),
-      );
-    } catch (error) {
-      logger.error("Failed to cache balance", error instanceof Error ? error : undefined);
-    }
-  }
-
-  return {
-    creditsCents,
-    usdcBalance,
-    lastChecked: new Date().toISOString(),
-  };
-}
-
 function log(_config: AutomatonConfig, message: string): void {
   logger.info(message);
 }
