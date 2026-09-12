@@ -27,13 +27,14 @@ interface InferenceClientOptions {
   openaiApiKey?: string;
   anthropicApiKey?: string;
   ollamaBaseUrl?: string;
+  deepseekApiKey?: string;
   nimApiKey?: string;
   nimBaseUrl?: string;
   /** Optional registry lookup — if provided, used before name heuristics */
   getModelProvider?: (modelId: string) => string | undefined;
 }
 
-type InferenceBackend = "conway" | "openai" | "anthropic" | "ollama" | "deepseek";
+type InferenceBackend = "conway" | "openai" | "anthropic" | "ollama" | "nim" | "deepseek";
 
 function isLoopbackHttpUrl(url: string | undefined): boolean {
   if (!url) return false;
@@ -50,16 +51,28 @@ function isLoopbackHttpUrl(url: string | undefined): boolean {
 export function createInferenceClient(
   options: InferenceClientOptions,
 ): InferenceClient {
-  const { apiUrl, apiKey, openaiApiKey, anthropicApiKey, ollamaBaseUrl, getModelProvider } = options;
+  const {
+    apiUrl,
+    apiKey,
+    openaiApiKey,
+    anthropicApiKey,
+    ollamaBaseUrl,
+    deepseekApiKey,
+    nimApiKey,
+    nimBaseUrl,
+    getModelProvider,
+  } = options;
   const httpClient = new ResilientHttpClient({
     baseTimeout: INFERENCE_TIMEOUT_MS,
-    retryableStatuses: [429, 500, 502, 503, 504],
+    // A 429 can mean account quota exhaustion. Surface it immediately so a
+    // configured fallback provider can take over instead of wasting retries.
+    retryableStatuses: [500, 502, 503, 504],
     allowHttpOnLoopback: isLoopbackHttpUrl(ollamaBaseUrl),
   });
   let currentModel = options.defaultModel;
   let maxTokens = options.maxTokens;
 
-  const chat = async (
+  const chatSingle = async (
     messages: ChatMessage[],
     opts?: InferenceOptions,
   ): Promise<InferenceResponse> => {
@@ -70,6 +83,7 @@ export function createInferenceClient(
       openaiApiKey,
       anthropicApiKey,
       ollamaBaseUrl,
+      nimApiKey,
       getModelProvider,
     });
 
@@ -114,11 +128,13 @@ export function createInferenceClient(
 
     const openAiLikeApiUrl =
       backend === "deepseek" ? "https://api.deepseek.com" :
+      backend === "nim" ? (nimBaseUrl || "https://integrate.api.nvidia.com").replace(/\/v1\/?$/, "") :
       backend === "openai" ? "https://api.openai.com" :
       backend === "ollama" ? (ollamaBaseUrl as string).replace(/\/$/, "") :
       apiUrl;
     const openAiLikeApiKey =
-      backend === "deepseek" ? (process.env.DEEPSEEK_API_KEY as string) :
+      backend === "deepseek" ? (deepseekApiKey || process.env.DEEPSEEK_API_KEY as string) :
+      backend === "nim" ? (nimApiKey as string) :
       backend === "openai" ? (openaiApiKey as string) :
       backend === "ollama" ? "ollama" :
       apiKey;
@@ -131,6 +147,32 @@ export function createInferenceClient(
       backend,
       httpClient,
     });
+  };
+
+  const chat = async (
+    messages: ChatMessage[],
+    opts?: InferenceOptions,
+  ): Promise<InferenceResponse> => {
+    const models = [opts?.model || currentModel, ...(opts?.fallbackModels || [])]
+      .filter((model, index, all) => Boolean(model) && all.indexOf(model) === index);
+    let lastError: unknown;
+
+    for (let index = 0; index < models.length; index++) {
+      try {
+        return await chatSingle(messages, {
+          ...opts,
+          model: models[index],
+          fallbackModels: undefined,
+        });
+      } catch (error) {
+        lastError = error;
+        if (index === models.length - 1 || !shouldFailOver(error)) {
+          throw error;
+        }
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
   };
 
   /**
@@ -184,13 +226,21 @@ function resolveInferenceBackend(
     openaiApiKey?: string;
     anthropicApiKey?: string;
     ollamaBaseUrl?: string;
+    nimApiKey?: string;
     getModelProvider?: (modelId: string) => string | undefined;
   },
 ): InferenceBackend {
   // Registry-based routing: most accurate, no name guessing
   if (keys.getModelProvider) {
     const provider = keys.getModelProvider(model);
-    if (provider === "ollama" && keys.ollamaBaseUrl) return "ollama";
+    if (provider === "ollama") {
+      if (keys.ollamaBaseUrl) return "ollama";
+      throw new Error(`Model '${model}' requires OLLAMA_BASE_URL`);
+    }
+    if (provider === "nim") {
+      if (keys.nimApiKey) return "nim";
+      throw new Error(`Model '${model}' requires NVIDIA_NIM_API_KEY`);
+    }
     if (provider === "anthropic" && keys.anthropicApiKey) return "anthropic";
     if (provider === "openai" && keys.openaiApiKey) return "openai";
     if (provider === "deepseek") return "deepseek";
@@ -205,12 +255,24 @@ function resolveInferenceBackend(
 
 }
 
+/**
+ * Retryable provider failures and quota/context exhaustion can use a configured
+ * fallback model. Invalid requests other than a context limit must fail closed.
+ */
+function shouldFailOver(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  const status = /\b(429|500|502|503|504)\b/.test(message);
+  const quota = /insufficient[_\s-]?quota|billing|credit balance|rate limit|too many requests/.test(message);
+  const context = /context length|context window|maximum context|too many tokens|token limit/.test(message);
+  return status || quota || context;
+}
+
 async function chatViaOpenAiCompatible(params: {
   model: string;
   body: Record<string, unknown>;
   apiUrl: string;
   apiKey: string;
-  backend: "conway" | "openai" | "ollama" | "deepseek";
+  backend: "conway" | "openai" | "ollama" | "nim" | "deepseek";
   httpClient: ResilientHttpClient;
 }): Promise<InferenceResponse> {
   const resp = await params.httpClient.request(`${params.apiUrl}/v1/chat/completions`, {
@@ -218,7 +280,7 @@ async function chatViaOpenAiCompatible(params: {
     headers: {
       "Content-Type": "application/json",
       Authorization:
-        params.backend === "openai" || params.backend === "ollama" || params.backend === "deepseek"
+        params.backend === "openai" || params.backend === "ollama" || params.backend === "nim" || params.backend === "deepseek"
           ? `Bearer ${params.apiKey}`
           : params.apiKey,
     },

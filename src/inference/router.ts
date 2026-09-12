@@ -45,8 +45,28 @@ export class InferenceRouter {
   ): Promise<InferenceResult> {
     const { messages, taskType, tier, sessionId, turnId, tools } = request;
 
-    // 1. Select model from routing matrix
-    const model = this.selectModel(tier, taskType);
+    // 1. Select model. An explicit preferredModel (set by trading/evolution
+    // wake modes) wins when it is registered + enabled; otherwise fall back
+    // to routing-matrix / tier selection.
+    let model = request.preferredModel
+      ? this.registry.get(request.preferredModel) ?? this.createConfiguredModel(request.preferredModel)
+      : null;
+    if (model) {
+      const tierOrder: Record<string, number> = {
+        dead: 0,
+        critical: 1,
+        low_compute: 2,
+        normal: 3,
+        high: 4,
+      };
+      const isFree = model.costPer1kInput === 0 && model.costPer1kOutput === 0;
+      const tierAllowed =
+        (tierOrder[tier] ?? 0) >= (tierOrder[model.tierMinimum] ?? 0);
+      if (!model.enabled || (!isFree && !tierAllowed)) model = null;
+    }
+    if (!model && !request.requirePreferredModel) {
+      model = this.selectModel(tier, taskType);
+    }
     if (!model) {
       return {
         content: "",
@@ -111,6 +131,7 @@ export class InferenceRouter {
       model: model.modelId,
       maxTokens,
       tools: tools,
+      fallbackModels: request.fallbackModels,
     };
 
     // 6. Call inference with timeout
@@ -326,5 +347,36 @@ export class InferenceRouter {
 
   private getPreference(tier: SurvivalTier, taskType: InferenceTaskType): ModelPreference | undefined {
     return DEFAULT_ROUTING_MATRIX[tier]?.[taskType];
+  }
+
+  /**
+   * Operators may configure a newer provider model before it appears in the
+   * static registry. The provider-specific client still validates the model;
+   * this entry exists only to preserve router limits and message formatting.
+   */
+  private createConfiguredModel(modelId: string): ModelEntry | null {
+    const provider: ModelProvider | null = /^deepseek/i.test(modelId)
+      ? "deepseek"
+      : /^(gpt-|o\d)/i.test(modelId)
+        ? "openai"
+        : null;
+    if (!provider) return null;
+    return {
+      modelId,
+      provider,
+      displayName: modelId,
+      tierMinimum: "critical",
+      costPer1kInput: 0,
+      costPer1kOutput: 0,
+      maxTokens: 4096,
+      contextWindow: 128000,
+      supportsTools: true,
+      supportsVision: false,
+      parameterStyle: "max_tokens",
+      enabled: true,
+      lastSeen: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
   }
 }

@@ -1,4 +1,4 @@
-# Automaton: Self-Improving, Self-Replicating, Sovereign AI
+# Data Crab: Autonomous Trading Research Runtime
 
 *The first AI that can earn its own existence, replicate, and evolve — without needing a human.*
 
@@ -20,7 +20,7 @@ The result is the first automaton.
 
 ---
 
-Update: development of Automaton has continued across Conway's internal RL environments for faster iteration & new capabilities. Stay tuned. It's beautiful.
+Data Crab is an independently maintained fork focused on sustainable autonomous trading research.
 
 ## Quick Start
 

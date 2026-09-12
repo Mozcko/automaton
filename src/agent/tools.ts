@@ -3280,6 +3280,41 @@ Model: ${ctx.inference.getDefaultModel()}
 
     // ── Market Intelligence & Safety Tools ──
     {
+      name: "start_next_generation",
+      description: "Start the next trading generation after an evolution review. Clears the daily-profit trading halt and snapshots the current exchange PnL as the new baseline.",
+      category: "self_mod",
+      riskLevel: "dangerous",
+      parameters: {
+        type: "object",
+        properties: {
+          reason: { type: "string", description: "What was improved for the next generation" },
+        },
+        required: ["reason"],
+      },
+      execute: async (args, ctx) => {
+        if (!ctx.db.getKV("trading_halted")) {
+          return "Blocked: the current trading generation is not halted.";
+        }
+        const { ExchangeAdapter } = await import("../exchange/adapter.js");
+        const { startNextGeneration } = await import("../trading/generation.js");
+        const pnl = await new ExchangeAdapter().getPnl();
+        const state = startNextGeneration(
+          ctx.db,
+          Math.round(pnl * 100),
+          new Date(),
+          ctx.config.generationPolicy,
+        );
+        ctx.db.insertModification({
+          id: ulid(),
+          timestamp: new Date().toISOString(),
+          type: "config_change",
+          description: `Started trading generation ${state.generation}: ${args.reason as string}`,
+          reversible: false,
+        });
+        return `Trading generation ${state.generation} started. Daily gross-profit target: $${(state.targetCents / 100).toFixed(2)}.`;
+      },
+    },
+    {
       name: "analyze_market",
       description: "Analyze market indicators (RSI, Moving Averages) using Binance Klines.",
       category: "financial",
@@ -3294,7 +3329,11 @@ Model: ${ctx.inference.getDefaultModel()}
       },
       execute: async (args, ctx) => {
         try {
-          const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${args.symbol}&interval=${args.interval}&limit=14`);
+          // ccxt uses pairs such as BTC/MXN while Binance's REST API expects
+          // BTCMXN. Accept either form so the trading cadence, prompt, and
+          // market-analysis tool share one symbol configuration.
+          const symbol = String(args.symbol).replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+          const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${args.interval}&limit=14`);
           if (!res.ok) return `API Error: ${res.statusText}`;
           const data = await res.json();
           const closes = data.map((d: any) => parseFloat(d[4]));

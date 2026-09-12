@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { runAgentLoop } from "../agent/loop.js";
 import { Orchestrator } from "../orchestration/orchestrator.js";
+import { ModelRegistry } from "../inference/registry.js";
 import {
   MockInferenceClient,
   MockConwayClient,
@@ -18,6 +19,43 @@ import {
   noToolResponse,
 } from "./mocks.js";
 import type { AutomatonDatabase, AgentTurn, AgentState } from "../types.js";
+import { DEFAULT_MODEL_STRATEGY_CONFIG } from "../types.js";
+
+/**
+ * Force the agent loop into EVOLUTION (slow, multi-turn, full-tool) mode.
+ * Sets a fresh evolution request and clears the cooldown so resolveWakeMode
+ * returns "evolution".
+ */
+function forceEvolutionMode(
+  db: AutomatonDatabase,
+  config: ReturnType<typeof createTestConfig>,
+): void {
+  db.setKV("requested_wake_mode", "evolution");
+  db.deleteKV("last_evolution_run");
+  const now = new Date().toISOString();
+  const registry = new ModelRegistry(db.raw);
+  registry.upsert({
+    modelId: "test-local-evolution",
+    provider: "other",
+    displayName: "Test Local Evolution Model",
+    tierMinimum: "critical",
+    costPer1kInput: 0,
+    costPer1kOutput: 0,
+    maxTokens: 4096,
+    contextWindow: 8192,
+    supportsTools: true,
+    supportsVision: false,
+    parameterStyle: "max_tokens",
+    enabled: true,
+    lastSeen: now,
+    createdAt: now,
+    updatedAt: now,
+  });
+  config.modelStrategy = {
+    ...DEFAULT_MODEL_STRATEGY_CONFIG,
+    slowEvolutionModel: "test-local-evolution",
+  };
+}
 
 describe("Agent Loop", () => {
   let db: AutomatonDatabase;
@@ -30,11 +68,88 @@ describe("Agent Loop", () => {
     conway = new MockConwayClient();
     identity = createTestIdentity();
     config = createTestConfig();
+    // These tests exercise the general multi-turn agent behavior (exec,
+    // read_file, discover_agents, loop detection). That is the EVOLUTION
+    // (slow) loop, which runs the full tool set and multiple turns per wake.
+    // The TRADING (fast) loop's single-turn behavior is covered separately in
+    // trading-cadence / heartbeat-trading tests. Force evolution mode here so
+    // the loop does not short-circuit after one turn.
+    forceEvolutionMode(db, config);
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     db.close();
+  });
+
+  describe("trading fast loop (Step 1)", () => {
+    function forceTradingMode(d: AutomatonDatabase): void {
+      // Undo the outer beforeEach evolution override.
+      d.deleteKV("requested_wake_mode");
+      d.setKV("last_evolution_run", new Date().toISOString());
+      config.modelStrategy = {
+        ...DEFAULT_MODEL_STRATEGY_CONFIG,
+        // Registered, tool-capable small model. MockInferenceClient handles
+        // the call, so this test does not contact NVIDIA.
+        fastTradingModel: "meta/llama-3.1-8b-instruct",
+      };
+    }
+
+    it("performs exactly ONE inference call then sleeps on cadence", async () => {
+      forceTradingMode(db);
+      // Seed a flat market so the cadence picks the long (max) interval.
+      const now = Date.now();
+      db.setKV(
+        "market_snapshots",
+        JSON.stringify([
+          { symbol: "BTC/MXN", price: 1_000_000, timestamp: new Date(now - 120_000).toISOString() },
+          { symbol: "BTC/MXN", price: 1_000_050, timestamp: new Date(now).toISOString() },
+        ]),
+      );
+
+      const inference = new MockInferenceClient([
+        toolCallResponse([
+          { name: "get_market_price", arguments: { symbol: "BTC/MXN" } },
+        ]),
+        // A second response exists but must NOT be consumed in trading mode.
+        toolCallResponse([
+          { name: "get_market_price", arguments: { symbol: "BTC/MXN" } },
+        ]),
+      ]);
+
+      await runAgentLoop({ identity, config, db, conway, inference });
+
+      // Exactly one inference call — no multi-turn churn.
+      expect(inference.calls.length).toBe(1);
+      expect(db.getAgentState()).toBe("sleeping");
+
+      // Slept on the flat-market (max) interval, ~15 min.
+      const sleepUntil = db.getKV("sleep_until");
+      expect(sleepUntil).toBeDefined();
+      const sleepMs = new Date(sleepUntil!).getTime() - Date.now();
+      expect(sleepMs).toBeGreaterThan(10 * 60_000); // well over 10 min
+    });
+
+    it("does not expose general tools (exec) in trading mode", async () => {
+      forceTradingMode(db);
+      const inference = new MockInferenceClient([
+        toolCallResponse([{ name: "exec", arguments: { command: "echo hi" } }]),
+      ]);
+
+      const turns: AgentTurn[] = [];
+      await runAgentLoop({
+        identity,
+        config,
+        db,
+        conway,
+        inference,
+        onTurnComplete: (t) => turns.push(t),
+      });
+
+      const execCall = turns[0]?.toolCalls.find((tc) => tc.name === "exec");
+      expect(execCall?.error).toContain("Unknown tool");
+      expect(conway.execCalls.length).toBe(0);
+    });
   });
 
   it("exec tool runs and is persisted", async () => {

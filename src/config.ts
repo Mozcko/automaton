@@ -1,12 +1,13 @@
 import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
-import type { AutomatonConfig, TreasuryPolicy, ModelStrategyConfig, SoulConfig } from "./types.js";
-import { DEFAULT_CONFIG, DEFAULT_TREASURY_POLICY, DEFAULT_MODEL_STRATEGY_CONFIG, DEFAULT_SOUL_CONFIG } from "./types.js";
+import type { AutomatonConfig, TreasuryPolicy, ModelStrategyConfig, SoulConfig, TradingCadenceConfig, GenerationPolicyConfig } from "./types.js";
+import { DEFAULT_CONFIG, DEFAULT_TREASURY_POLICY, DEFAULT_MODEL_STRATEGY_CONFIG, DEFAULT_SOUL_CONFIG, DEFAULT_TRADING_CADENCE_CONFIG, DEFAULT_GENERATION_POLICY_CONFIG } from "./types.js";
 import { getAutomatonDir } from "./identity/wallet.js";
 import { loadApiKeyFromConfig } from "./identity/provision.js";
 import { createLogger } from "./observability/logger.js";
 import type { ChainType } from "./identity/chain.js";
+import { normalizeTradingCadence } from "./trading/cadence.js";
 
 const logger = createLogger("config");
 
@@ -34,10 +35,34 @@ export function loadConfig(): AutomatonConfig | null {
     if (process.env.MODEL_STRATEGY) {
       Object.assign(modelStrategy, JSON.parse(process.env.MODEL_STRATEGY));
     }
+    // Simple Railway/.env overrides for the routine provider order. These win
+    // over MODEL_STRATEGY so operators do not need to edit JSON to rotate a model.
+    if (process.env.FAST_TRADING_MODEL) {
+      modelStrategy.fastTradingModel = process.env.FAST_TRADING_MODEL;
+    }
+    if (process.env.FAST_TRADING_FALLBACK_MODEL) {
+      modelStrategy.fastTradingFallbackModel = process.env.FAST_TRADING_FALLBACK_MODEL;
+    }
     const soulConfig: SoulConfig = { ...DEFAULT_SOUL_CONFIG };
     if (process.env.SOUL_CONFIG) {
       Object.assign(soulConfig, JSON.parse(process.env.SOUL_CONFIG));
     }
+    let tradingCadence: TradingCadenceConfig = { ...DEFAULT_TRADING_CADENCE_CONFIG };
+    if (process.env.TRADING_CADENCE) {
+      tradingCadence = normalizeTradingCadence(
+        JSON.parse(process.env.TRADING_CADENCE) as Partial<TradingCadenceConfig>,
+      );
+    }
+    const generationPolicy: GenerationPolicyConfig = {
+      dailyProfitTargetCents: dollarsToCents(
+        process.env.DAILY_GROSS_PROFIT_TARGET_USD,
+        DEFAULT_GENERATION_POLICY_CONFIG.dailyProfitTargetCents,
+      ),
+      dailyProfitRaiseCents: dollarsToCents(
+        process.env.DAILY_GROSS_PROFIT_RAISE_USD,
+        DEFAULT_GENERATION_POLICY_CONFIG.dailyProfitRaiseCents,
+      ),
+    };
 
     return {
       ...DEFAULT_CONFIG,
@@ -48,6 +73,7 @@ export function loadConfig(): AutomatonConfig | null {
       sandboxId: process.env.SANDBOX_ID || (DEFAULT_CONFIG.sandboxId as string),
       conwayApiKey: process.env.CONWAY_API_KEY || "",
       openaiApiKey: process.env.OPENAI_API_KEY,
+      deepseekApiKey: process.env.DEEPSEEK_API_KEY,
       anthropicApiKey: process.env.ANTHROPIC_API_KEY,
       nimApiKey: process.env.NVIDIA_NIM_API_KEY,
       ollamaBaseUrl: process.env.OLLAMA_BASE_URL,
@@ -58,7 +84,9 @@ export function loadConfig(): AutomatonConfig | null {
       chainType: (process.env.CHAIN_TYPE as ChainType) || "evm",
       treasuryPolicy,
       modelStrategy,
-      soulConfig
+      soulConfig,
+      tradingCadence,
+      generationPolicy,
     } as AutomatonConfig;
   } catch (e) {
     logger.error("Failed to parse .env configuration", e instanceof Error ? e : new Error(String(e)));
@@ -93,6 +121,7 @@ export function saveConfig(config: AutomatonConfig): void {
   updateEnv("SANDBOX_ID", config.sandboxId);
   updateEnv("CONWAY_API_KEY", config.conwayApiKey);
   updateEnv("OPENAI_API_KEY", config.openaiApiKey);
+  updateEnv("DEEPSEEK_API_KEY", config.deepseekApiKey);
   updateEnv("ANTHROPIC_API_KEY", config.anthropicApiKey);
   updateEnv("NVIDIA_NIM_API_KEY", config.nimApiKey);
   updateEnv("OLLAMA_BASE_URL", config.ollamaBaseUrl);
@@ -103,7 +132,12 @@ export function saveConfig(config: AutomatonConfig): void {
   updateEnv("CHAIN_TYPE", config.chainType);
   updateEnv("TREASURY_POLICY", config.treasuryPolicy);
   updateEnv("MODEL_STRATEGY", config.modelStrategy);
+  updateEnv("FAST_TRADING_MODEL", config.modelStrategy?.fastTradingModel);
+  updateEnv("FAST_TRADING_FALLBACK_MODEL", config.modelStrategy?.fastTradingFallbackModel);
+  updateEnv("DAILY_GROSS_PROFIT_TARGET_USD", (config.generationPolicy?.dailyProfitTargetCents ?? DEFAULT_GENERATION_POLICY_CONFIG.dailyProfitTargetCents) / 100);
+  updateEnv("DAILY_GROSS_PROFIT_RAISE_USD", (config.generationPolicy?.dailyProfitRaiseCents ?? DEFAULT_GENERATION_POLICY_CONFIG.dailyProfitRaiseCents) / 100);
   updateEnv("SOUL_CONFIG", config.soulConfig);
+  updateEnv("TRADING_CADENCE", config.tradingCadence);
 
   fs.writeFileSync(configPath, envContent, { mode: 0o600 });
 }
@@ -127,6 +161,7 @@ export function createConfig(params: any): AutomatonConfig {
     conwayApiUrl: DEFAULT_CONFIG.conwayApiUrl || "https://api.conway.tech",
     conwayApiKey: params.apiKey,
     openaiApiKey: params.openaiApiKey,
+    deepseekApiKey: params.deepseekApiKey,
     anthropicApiKey: params.anthropicApiKey,
     nimApiKey: params.nimApiKey,
     ollamaBaseUrl: params.ollamaBaseUrl,
@@ -142,6 +177,17 @@ export function createConfig(params: any): AutomatonConfig {
     maxChildren: DEFAULT_CONFIG.maxChildren || 3,
     parentAddress: params.parentAddress,
     treasuryPolicy: params.treasuryPolicy ?? DEFAULT_TREASURY_POLICY,
+    modelStrategy: params.modelStrategy ?? { ...DEFAULT_MODEL_STRATEGY_CONFIG },
+    tradingCadence: normalizeTradingCadence(params.tradingCadence),
+    generationPolicy: params.generationPolicy ?? DEFAULT_GENERATION_POLICY_CONFIG,
     chainType: params.chainType || "evm",
   } as AutomatonConfig;
+}
+
+function dollarsToCents(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback;
+  const dollars = Number(raw);
+  return Number.isFinite(dollars) && dollars > 0
+    ? Math.round(dollars * 100)
+    : fallback;
 }

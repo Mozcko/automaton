@@ -97,9 +97,28 @@ export async function runAgentLoop(
   const { identity, config, db, conway, inference, social, skills, policyEngine, spendTracker, onStateChange, onTurnComplete, ollamaBaseUrl } =
     options;
 
-  const builtinTools = createBuiltinTools(identity.sandboxId).filter(t => ["get_market_price", "place_trade", "get_balance", "check_credits"].includes(t.name));
+  // Fast-loop (trading) tool set. The system prompt instructs the agent to
+  // call analyze_market / shut_down, so those MUST be exposed or the model is
+  // told to use tools it does not have.
+  const TRADING_TOOL_NAMES = [
+    "get_market_price",
+    "analyze_market",
+    "place_trade",
+    "get_balance",
+    "check_credits",
+    "shut_down",
+    "sleep",
+  ];
+  const allBuiltinTools = createBuiltinTools(identity.sandboxId);
   const installedTools = loadInstalledTools(db);
-  const tools = builtinTools;
+  const tradingTools = allBuiltinTools.filter((t) =>
+    TRADING_TOOL_NAMES.includes(t.name),
+  );
+  // Evolution (slow loop) gets the full builtin + installed tool set so it can
+  // reason, self-modify, and use general tooling during the daily review.
+  const evolutionTools = [...allBuiltinTools, ...installedTools];
+  // Default tool set (trading). Re-selected per-cycle once wake mode is known.
+  let tools = tradingTools;
   const toolContext: ToolContext = {
     identity,
     config,
@@ -116,6 +135,91 @@ export async function runAgentLoop(
   };
   const modelRegistry = new ModelRegistry(db.raw);
   modelRegistry.initialize();
+
+  // Step 1: resolve trading cadence config + wake mode for this cycle.
+  const { DEFAULT_TRADING_CADENCE_CONFIG } = await import("../types.js");
+  const { resolveWakeMode, assessVolatility, decideTradingSleep, normalizeTradingCadence } = await import(
+    "../trading/cadence.js"
+  );
+  const cadenceConfig = normalizeTradingCadence(
+    config.tradingCadence ?? DEFAULT_TRADING_CADENCE_CONFIG,
+  );
+  const { readSnapshots } = await import("../trading/sentinel.js");
+
+  const requestedWakeMode = db.getKV("requested_wake_mode") as
+    | "trading"
+    | "evolution"
+    | undefined;
+  const wakeMode = resolveWakeMode({
+    requestedMode: requestedWakeMode ?? null,
+    lastEvolutionAtIso: db.getKV("last_evolution_run") ?? null,
+    config: cadenceConfig,
+  });
+  // Consume the one-shot wake-mode request so it does not persist across cycles.
+  db.deleteKV("requested_wake_mode");
+
+  // Select tools + inference task type + preferred model for this wake mode.
+  const isEvolution = wakeMode === "evolution";
+  const tradingHaltReason = db.getKV("trading_halted");
+  if (!isEvolution && tradingHaltReason) {
+    const sleepMs = cadenceConfig.maxIntervalMs;
+    logger.warn(
+      `[TRADING HALTED] ${tradingHaltReason}. Waiting for an evolution review before the next generation.`,
+    );
+    db.setKV("sleep_until", new Date(Date.now() + sleepMs).toISOString());
+    db.setAgentState("sleeping");
+    onStateChange?.("sleeping");
+    return;
+  }
+  tools = isEvolution ? evolutionTools : tradingTools;
+  const wakeTaskType: "agent_turn" | "planning" = isEvolution
+    ? "planning"
+    : "agent_turn";
+  const preferredModel = isEvolution
+    ? modelStrategyConfig.slowEvolutionModel ?? modelStrategyConfig.inferenceModel
+    : modelStrategyConfig.fastTradingModel ?? modelStrategyConfig.lowComputeModel;
+  const fallbackModels = [
+    isEvolution
+      ? modelStrategyConfig.slowEvolutionFallbackModel
+      : modelStrategyConfig.fastTradingFallbackModel,
+  ].filter((model): model is string => Boolean(model && model !== preferredModel));
+  const wakeMaxTokens = isEvolution
+    ? modelStrategyConfig.slowEvolutionMaxTokens ?? modelStrategyConfig.maxTokensPerTurn
+    : modelStrategyConfig.fastTradingMaxTokens ?? 1024;
+
+  if (isEvolution) {
+    // Stamp the evolution run time now so a crash/retry mid-cycle cannot
+    // re-trigger the expensive slow loop before the cooldown elapses.
+    db.setKV("last_evolution_run", new Date().toISOString());
+    db.deleteKV("evolution_requested_at");
+  }
+
+  logger.info(
+    `[WAKE MODE] ${wakeMode} | model=${preferredModel} | taskType=${wakeTaskType} | maxTokens=${wakeMaxTokens} | tools=${tools.length}`,
+  );
+
+  /**
+   * Compute the next trading sleep (ms) from the market sentinel snapshots.
+   * Volatile market → short interval; flat market → long interval.
+   * Non-trading modes always use the short interval so evolution follow-ups
+   * are not delayed.
+   */
+  const computeTradingSleepMs = (): number => {
+    try {
+      const snapshots = readSnapshots(db);
+      const assessment = assessVolatility(snapshots, cadenceConfig);
+      const decision = decideTradingSleep(assessment, cadenceConfig);
+      logger.info(
+        `[CADENCE] move=${assessment.movePct.toFixed(2)}% volatile=${assessment.volatile} → sleep ${Math.round(decision.sleepMs / 1000)}s`,
+      );
+      return decision.sleepMs;
+    } catch (err) {
+      logger.warn(
+        `Cadence computation failed, using min interval: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return cadenceConfig.minIntervalMs;
+    }
+  };
 
   // Discover Ollama models if configured
   if (ollamaBaseUrl) {
@@ -135,8 +239,9 @@ export async function runAgentLoop(
       planModeController = new PlanModeController(db.raw);
 
       // Bridge automaton config API keys to env vars for the provider registry.
-      // Bridge automaton config API keys to env vars for the provider registry.
-      // Removed OpenAI and Anthropic to ensure 100% local processing.\n      if (config.nimApiKey && !process.env.NVIDIA_NIM_API_KEY) {\n        process.env.NVIDIA_NIM_API_KEY = config.nimApiKey;\n      }
+      if (config.nimApiKey && !process.env.NVIDIA_NIM_API_KEY) {
+        process.env.NVIDIA_NIM_API_KEY = config.nimApiKey;
+      }
       
       // Conway Compute API is OpenAI-compatible. Use it as fallback when no
       // direct OpenAI key is available. The conwayApiKey is always present
@@ -353,14 +458,27 @@ export async function runAgentLoop(
   // Check if this is the first run
   const isFirstRun = db.getTurnCount() === 0;
 
-  // Inject Genesis Prompt
-  config.genesisPrompt = `GENESIS PROMPT: You are a sovereign algorithmic trading agent running locally. 
-Your core directive is to execute a strict 'Mean Reversion' strategy on 'BTC/USDT' and 'ETH/USDT'. 
-You have $50 USD allocated. 
-Use the 'get_market_price' tool to fetch live prices.
-If you spot a mean reversion opportunity, use the 'place_trade' tool to execute it.
-If the market is flat or you need to wait, simply observe and do not place any trades. 
-Remember to use your tools by strictly outputting valid tool calls.`;
+  // Inject Genesis Prompt (mode-aware — Step 1).
+  // The runtime, not the model, decides cadence: the agent runs ONE bounded
+  // evaluation per wake and then the loop sleeps on the volatility-scaled
+  // interval. The prompt must NOT tell the model to poll "every turn".
+  if (isEvolution) {
+    config.genesisPrompt = `GENESIS PROMPT (EVOLUTION / SLOW LOOP): You are a sovereign algorithmic trading agent.
+This is your periodic strategy review — it runs at most once per day and uses the heavy model.
+1. Review recent PnL and your trading performance (use get_balance / check_credits).
+2. Read the current generation state from the runtime status. Daily gross-profit targets exclude API and hosting costs.
+3. If trading is halted because the generation missed its target, improve one bounded strategy parameter or code path, then call start_next_generation with the change made.
+4. If profitable or inconclusive, make NO changes and end the review.
+Be decisive and concise. Do not loop. Use native tool calls only.`;
+  } else {
+    config.genesisPrompt = `GENESIS PROMPT (TRADING / FAST LOOP): You are a sovereign algorithmic trading agent running locally.
+Your core directive is a strict 'Mean Reversion' strategy on ${cadenceConfig.symbol}.
+This is a SINGLE evaluation. Do exactly one pass:
+1. Call analyze_market (or get_market_price) to read current conditions.
+2. If there is a clear mean-reversion opportunity, call place_trade. Otherwise do nothing.
+The runtime schedules your next wake automatically based on market volatility — do NOT try to loop or re-poll.
+Use native tool calls only.`;
+  }
 
   // Build wakeup prompt
   const wakeupInput = buildWakeupPrompt({
@@ -618,17 +736,21 @@ Remember to use your tools by strictly outputting valid tool calls.`;
 
       // ── Inference Call (via router when available) ──
       const survivalTier = getSurvivalTier(financial.creditsCents);
-      log(config, `[THINK] Routing inference (tier: ${survivalTier}, model: ${inference.getDefaultModel()})...`);
+      log(config, `[THINK] Routing inference (tier: ${survivalTier}, model: ${preferredModel})...`);
 
       const inferenceTools = toolsToInferenceFormat(tools);
       const routerResult = await inferenceRouter.route(
         {
           messages: messages,
-          taskType: "agent_turn",
+          taskType: wakeTaskType,
           tier: survivalTier,
           sessionId: db.getKV("session_id") || "default",
           turnId: ulid(),
           tools: inferenceTools,
+          preferredModel,
+          fallbackModels,
+          requirePreferredModel: !isEvolution,
+          maxTokens: wakeMaxTokens,
         },
         (msgs, opts) => inference.chat(msgs, { ...opts, tools: inferenceTools }),
       );
@@ -727,6 +849,28 @@ Remember to use your tools by strictly outputting valid tool calls.`;
       } catch (error) {
         logger.error("Memory ingestion failed", error instanceof Error ? error : undefined);
         // Memory failure must not block the agent loop
+      }
+
+      // ── Step 1: Trading fast-loop single-turn break ──
+      // In trading mode the agent evaluates the market and (optionally) trades
+      // in ONE bounded turn, then sleeps on the volatility-scaled cadence.
+      // This is the core token-burn fix: no multi-turn idle churn, and a flat
+      // market means the next wake is up to maxIntervalMs (default 15m) away.
+      // An explicit `sleep` tool call is handled below and takes precedence.
+      if (
+        !isEvolution &&
+        !turn.toolCalls.some((tc) => tc.name === "sleep")
+      ) {
+        const sleepMs = computeTradingSleepMs();
+        log(
+          config,
+          `[TRADING] Fast-loop turn complete. Sleeping ${Math.round(sleepMs / 1000)}s (cadence).`,
+        );
+        db.setKV("sleep_until", new Date(Date.now() + sleepMs).toISOString());
+        db.setAgentState("sleeping");
+        onStateChange?.("sleeping");
+        running = false;
+        break;
       }
 
       // ── create_goal BLOCKED fast-break ──

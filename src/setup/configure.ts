@@ -172,7 +172,9 @@ function val(v: string | number | boolean | undefined): string {
 function printMainMenu(config: AutomatonConfig): void {
   const providers = [
     config.openaiApiKey ? "OpenAI" : null,
+    config.deepseekApiKey ? "DeepSeek" : null,
     config.anthropicApiKey ? "Anthropic" : null,
+    config.nimApiKey ? "NVIDIA NIM" : null,
     config.ollamaBaseUrl ? "Ollama" : null,
     "Conway",
   ].filter(Boolean).join(", ");
@@ -204,7 +206,10 @@ async function configureProviders(config: AutomatonConfig): Promise<void> {
   );
 
   config.openaiApiKey = await askString("OpenAI API key  (sk-...)", config.openaiApiKey) || undefined;
+  config.deepseekApiKey = await askString("DeepSeek API key  (sk-...)", config.deepseekApiKey) || undefined;
   config.anthropicApiKey = await askString("Anthropic API key  (sk-ant-...)", config.anthropicApiKey) || undefined;
+  config.nimApiKey = await askString("NVIDIA NIM API key  (nvapi-...)", config.nimApiKey) || undefined;
+  config.nimBaseUrl = await askString("NVIDIA NIM base URL  (optional)", config.nimBaseUrl) || undefined;
   config.ollamaBaseUrl = await askString("Ollama base URL  (http://localhost:11434)", config.ollamaBaseUrl) || undefined;
 
   console.log("");
@@ -240,8 +245,35 @@ async function configureModelStrategy(config: AutomatonConfig): Promise<void> {
   s.inferenceModel = config.inferenceModel;
   s.lowComputeModel = await pickFromList("Low-compute fallback", s.lowComputeModel, models);
   s.criticalModel = await pickFromList("Critical fallback", s.criticalModel, models);
+  s.fastTradingModel = await pickFromList(
+    "Fast trading model",
+    s.fastTradingModel ?? s.lowComputeModel,
+    models,
+  );
+  s.fastTradingFallbackModel = await pickFromList(
+    "Fast trading fallback model",
+    s.fastTradingFallbackModel ?? "gpt-4.1-mini",
+    models,
+  );
+  s.slowEvolutionModel = await pickFromList(
+    "Slow evolution model",
+    s.slowEvolutionModel ?? s.inferenceModel,
+    models,
+  );
+  s.slowEvolutionFallbackModel = await pickFromList(
+    "Slow evolution fallback model",
+    s.slowEvolutionFallbackModel ?? "gpt-4.1",
+    models,
+  );
 
-
+  s.fastTradingMaxTokens = await askNumber(
+    "Fast trading max tokens",
+    s.fastTradingMaxTokens ?? 1024,
+  );
+  s.slowEvolutionMaxTokens = await askNumber(
+    "Slow evolution max tokens",
+    s.slowEvolutionMaxTokens ?? s.maxTokensPerTurn,
+  );
   const maxTokens = await askNumber("Max tokens per turn", s.maxTokensPerTurn);
   s.maxTokensPerTurn = maxTokens;
   config.maxTokensPerTurn = maxTokens;
