@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Conway Automaton CLI
+ * Data Crab CLI
  *
  * Creator-facing CLI for interacting with an automaton.
  * Usage: automaton-cli <command> [args]
@@ -25,7 +25,7 @@ async function main(): Promise<void> {
       break;
     default:
       console.log(`
-Conway Automaton CLI - Creator Tools
+Data Crab CLI - Operator Tools
 
 Usage:
   automaton-cli status              Show automaton status

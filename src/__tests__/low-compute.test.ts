@@ -153,4 +153,38 @@ describe("createInferenceClient setLowComputeMode", () => {
     client.setLowComputeMode(false);
     expect(client.getDefaultModel()).toBe("gpt-5.2");
   });
+
+  it("routes registered NVIDIA NIM models to the configured NIM endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        id: "nim-response",
+        model: "meta/llama-3.1-8b-instruct",
+        choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const client = createInferenceClient({
+        ...baseOptions,
+        nimApiKey: "nvapi-test",
+        nimBaseUrl: "https://integrate.api.nvidia.com/v1",
+        getModelProvider: () => "nim",
+      });
+      await client.chat([{ role: "user", content: "trade?" }], {
+        model: "meta/llama-3.1-8b-instruct",
+      });
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://integrate.api.nvidia.com/v1/chat/completions",
+        expect.objectContaining({
+          headers: expect.objectContaining({ Authorization: "Bearer nvapi-test" }),
+        }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });

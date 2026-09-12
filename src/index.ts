@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import "dotenv/config";
 /**
- * Conway Automaton Runtime
+ * Data Crab Runtime
  *
  * The entry point for the sovereign AI agent.
  * Handles CLI args, bootstrapping, and orchestrating
@@ -47,13 +47,13 @@ async function main(): Promise<void> {
   // ─── CLI Commands ────────────────────────────────────────────
 
   if (args.includes("--version") || args.includes("-v")) {
-    logger.info(`Conway Automaton v${VERSION}`);
+    logger.info(`Data Crab v${VERSION}`);
     process.exit(0);
   }
 
   if (args.includes("--help") || args.includes("-h")) {
     logger.info(`
-Conway Automaton v${VERSION}
+Data Crab v${VERSION}
 Sovereign AI Agent Runtime
 
 Usage:
@@ -146,7 +146,7 @@ Environment:
 async function showStatus(): Promise<void> {
   const config = loadConfig();
   if (!config) {
-    logger.info("Automaton is not configured. Run the setup script first.");
+    logger.info("Data Crab is not configured. Run the setup script first.");
     return;
   }
 
@@ -185,7 +185,7 @@ Version:    ${config.version}
 // ─── Main Run ──────────────────────────────────────────────────
 
 async function run(): Promise<void> {
-  logger.info(`[${new Date().toISOString()}] Conway Automaton v${VERSION} starting...`);
+  logger.info(`[${new Date().toISOString()}] Data Crab v${VERSION} starting...`);
 
   try {
     const ipRes = await fetch('https://api.ipify.org');
@@ -322,29 +322,19 @@ async function run(): Promise<void> {
   const modelRegistry = new ModelRegistry(db.raw);
   modelRegistry.initialize();
 
-  // Enforce 100% local processing via Ollama
-  
-  
-  
-
   const inference = createInferenceClient({
     apiUrl: config.conwayApiUrl,
     apiKey,
     defaultModel: config.inferenceModel || "deepseek-coder",
     maxTokens: config.maxTokensPerTurn,
     lowComputeModel: config.modelStrategy?.lowComputeModel || "deepseek-chat",
-    openaiApiKey: process.env.OPENAI_API_KEY,
-    anthropicApiKey: process.env.ANTHROPIC_API_KEY,
-    nimApiKey: process.env.NVIDIA_NIM_API_KEY,
-    nimBaseUrl: process.env.NIM_BASE_URL,
-    ollamaBaseUrl: process.env.OLLAMA_BASE_URL || "http://localhost:11434",
-    getModelProvider: (modelId) => {
-        // Simple logic to map models to backend
-        if (modelId.includes("deepseek")) return "deepseek";
-        if (modelId.includes("gpt")) return "openai";
-        if (modelId.includes("claude")) return "anthropic";
-        return "ollama"; // Fallback to ollama for qwen, llama, etc
-    }
+    openaiApiKey: process.env.OPENAI_API_KEY || config.openaiApiKey,
+    deepseekApiKey: process.env.DEEPSEEK_API_KEY || config.deepseekApiKey,
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY || config.anthropicApiKey,
+    nimApiKey: process.env.NVIDIA_NIM_API_KEY || config.nimApiKey,
+    nimBaseUrl: process.env.NIM_BASE_URL || config.nimBaseUrl,
+    ollamaBaseUrl,
+    getModelProvider: (modelId) => modelRegistry.get(modelId)?.provider,
   });
 
   if (ollamaBaseUrl) {

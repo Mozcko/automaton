@@ -19,7 +19,7 @@ if (tailIdx !== -1 && args[tailIdx + 1]) {
 
 const config = loadConfig();
 if (!config) {
-  console.log(chalk.red("No automaton configuration found."));
+  console.log(chalk.red("No Data Crab configuration found."));
   process.exit(1);
 }
 

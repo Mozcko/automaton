@@ -50,6 +50,7 @@ export interface AutomatonConfig {
   conwayApiUrl: string;
   conwayApiKey: string;
   openaiApiKey?: string;
+  deepseekApiKey?: string;
   anthropicApiKey?: string;
   nimApiKey?: string;
   nimBaseUrl?: string;
@@ -73,6 +74,9 @@ export interface AutomatonConfig {
   // Phase 2 config additions
   soulConfig?: SoulConfig;
   modelStrategy?: ModelStrategyConfig;
+  /** Step 1: dynamic trading-loop cadence (throttle) config. */
+  tradingCadence?: TradingCadenceConfig;
+  generationPolicy?: GenerationPolicyConfig;
   /** Custom RPC endpoint for Base chain interactions (overrides default public RPC) */
   rpcUrl?: string;
   /** Chain type for this automaton. Defaults to "evm" if absent. */
@@ -339,6 +343,7 @@ export interface InferenceResponse {
 
 export interface InferenceOptions {
   model?: string;
+  fallbackModels?: string[];
   maxTokens?: number;
   temperature?: number;
   tools?: InferenceToolDefinition[];
@@ -1144,7 +1149,7 @@ export const DEFAULT_MEMORY_BUDGET: MemoryBudget = {
 
 // === Phase 2.3: Inference & Model Strategy Types ===
 
-export type ModelProvider = "openai" | "anthropic" | "conway" | "ollama" | "other" | "deepseek";
+export type ModelProvider = "openai" | "anthropic" | "conway" | "ollama" | "nim" | "other" | "deepseek";
 
 export type InferenceTaskType =
   | "agent_turn"
@@ -1187,6 +1192,17 @@ export interface InferenceRequest {
   turnId?: string;
   maxTokens?: number; // override
   tools?: unknown[];
+  /**
+   * Explicit model id to use, bypassing the routing matrix / tier fallback.
+   * Used by the trading/evolution wake modes to force the cheap fast model
+   * or the heavy slow model. The model must exist and be enabled in the
+   * registry; otherwise the router falls back to normal selection.
+   */
+  preferredModel?: string;
+  /** Ordered model alternatives used after a retryable/quota/context failure. */
+  fallbackModels?: string[];
+  /** Return without inference instead of falling back when preferredModel is unavailable. */
+  requirePreferredModel?: boolean;
 }
 
 export interface InferenceResult {
@@ -1238,6 +1254,26 @@ export interface ModelStrategyConfig {
   inferenceModel: string;
   lowComputeModel: string;
   criticalModel: string;
+  /**
+   * Cheap/local model for the routine "fast" trading loop.
+   * Should be tool-capable (e.g. a local Ollama Llama 3 8B).
+   * Defaults to lowComputeModel when unset.
+   */
+  fastTradingModel?: string;
+  /** Used after fastTradingModel is unavailable (default: gpt-4.1-mini). */
+  fastTradingFallbackModel?: string;
+  /**
+   * Heavy model for the once-a-day "slow" evolution loop
+   * (strategy planning / self-modification). Defaults to
+   * inferenceModel when unset.
+   */
+  slowEvolutionModel?: string;
+  /** Used after slowEvolutionModel is unavailable (default: gpt-4.1). */
+  slowEvolutionFallbackModel?: string;
+  /** Max tokens for a routine trading turn. Default: 1024. */
+  fastTradingMaxTokens?: number;
+  /** Max tokens for an evolution turn. Default: maxTokensPerTurn. */
+  slowEvolutionMaxTokens?: number;
   maxTokensPerTurn: number;
   hourlyBudgetCents: number; // default: 0 (no limit)
   sessionBudgetCents: number; // default: 0 (no limit)
@@ -1250,6 +1286,12 @@ export const DEFAULT_MODEL_STRATEGY_CONFIG: ModelStrategyConfig = {
   inferenceModel: "deepseek-coder",
   lowComputeModel: "llama3.1:latest",
   criticalModel: "llama3.1:latest",
+  fastTradingModel: "deepseek-chat",
+  fastTradingFallbackModel: "gpt-4.1-mini",
+  slowEvolutionModel: "deepseek-coder",
+  slowEvolutionFallbackModel: "gpt-4.1",
+  fastTradingMaxTokens: 1024,
+  slowEvolutionMaxTokens: 4096,
   maxTokensPerTurn: 4096,
   hourlyBudgetCents: 0,
   sessionBudgetCents: 0,
@@ -1257,6 +1299,62 @@ export const DEFAULT_MODEL_STRATEGY_CONFIG: ModelStrategyConfig = {
   enableModelFallback: true,
   anthropicApiVersion: "2023-06-01",
 };
+
+// ─── Trading Cadence (Step 1: cognitive token burn) ──────────────
+
+/**
+ * Wake mode determines which loop the agent runs when it wakes:
+ * - "trading": routine fast loop, cheap model, one bounded turn, then sleep.
+ * - "evolution": daily slow loop, heavy model, strategy/self-mod planning.
+ */
+export type WakeMode = "trading" | "evolution";
+
+export interface TradingCadenceConfig {
+  /** Symbol the market sentinel watches (ccxt style). Default "BTC/MXN". */
+  symbol: string;
+  /** Shortest sleep between trading wakes, ms. Default 60_000 (1 min). */
+  minIntervalMs: number;
+  /** Longest sleep when the market is flat, ms. Default 900_000 (15 min). */
+  maxIntervalMs: number;
+  /**
+   * Absolute percentage price move (over the sentinel lookback) at or above
+   * which the market is considered volatile and the agent wakes on the
+   * short interval. Default 0.5 (%).
+   */
+  volatilityThresholdPct: number;
+  /** How far back the sentinel measures the price move, ms. Default 900_000. */
+  lookbackMs: number;
+  /** Minimum ms between two evolution wakes. Default 86_400_000 (24h). */
+  evolutionIntervalMs: number;
+}
+
+export interface GenerationPolicyConfig {
+  /** Gross PnL required per completed UTC day. Default: $2.00. */
+  dailyProfitTargetCents: number;
+  /** Target increase after a successful day. Default: $0.20. */
+  dailyProfitRaiseCents: number;
+}
+
+export const DEFAULT_GENERATION_POLICY_CONFIG: GenerationPolicyConfig = {
+  dailyProfitTargetCents: 200,
+  dailyProfitRaiseCents: 20,
+};
+
+export const DEFAULT_TRADING_CADENCE_CONFIG: TradingCadenceConfig = {
+  symbol: "BTC/MXN",
+  minIntervalMs: 60_000,
+  maxIntervalMs: 900_000,
+  volatilityThresholdPct: 0.5,
+  lookbackMs: 900_000,
+  evolutionIntervalMs: 86_400_000,
+};
+
+/** A single market observation persisted by the sentinel heartbeat task. */
+export interface MarketSnapshot {
+  symbol: string;
+  price: number;
+  timestamp: string;
+}
 
 // === Phase 3.1: Replication & Lifecycle Types ===
 

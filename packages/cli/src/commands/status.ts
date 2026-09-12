@@ -12,7 +12,7 @@ const accent = chalk.rgb(131, 127, 255);
 
 const config = loadConfig();
 if (!config) {
-  console.log(chalk.red("No automaton configuration found."));
+  console.log(chalk.red("No Data Crab configuration found."));
   process.exit(1);
 }
 

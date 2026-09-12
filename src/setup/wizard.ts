@@ -82,7 +82,7 @@ export async function runSetupWizard(): Promise<AutomatonConfig> {
   // ─── 3. Interactive questions ─────────────────────────────────
   console.log(chalk.cyan("  [3/6] Setup questions\n"));
 
-  const name = await promptRequired("What do you want to name your automaton?");
+  const name = await promptRequired("What do you want to name your Data Crab agent?");
   console.log(chalk.green(`  Name: ${name}\n`));
 
   const genesisPrompt = await promptMultiline("Enter the genesis prompt (system prompt) for your automaton.");
@@ -102,6 +102,8 @@ export async function runSetupWizard(): Promise<AutomatonConfig> {
     console.log(chalk.yellow("  Warning: OpenAI keys usually start with sk-. Saving anyway."));
   }
 
+  const deepseekApiKey = await promptOptional("DeepSeek API key (sk-..., optional)");
+
   const anthropicApiKey = await promptOptional("Anthropic API key (sk-ant-..., optional)");
   if (anthropicApiKey && !anthropicApiKey.startsWith("sk-ant-")) {
     console.log(chalk.yellow("  Warning: Anthropic keys usually start with sk-ant-. Saving anyway."));
@@ -113,9 +115,10 @@ export async function runSetupWizard(): Promise<AutomatonConfig> {
     console.log(chalk.green(`  Ollama URL saved: ${ollamaBaseUrl}`));
   }
 
-  if (openaiApiKey || anthropicApiKey || ollamaBaseUrl) {
+  if (openaiApiKey || deepseekApiKey || anthropicApiKey || ollamaBaseUrl) {
     const providers = [
       openaiApiKey ? "OpenAI" : null,
+      deepseekApiKey ? "DeepSeek" : null,
       anthropicApiKey ? "Anthropic" : null,
       ollamaBaseUrl ? "Ollama" : null,
     ].filter(Boolean).join(", ");
@@ -171,6 +174,7 @@ export async function runSetupWizard(): Promise<AutomatonConfig> {
     walletAddress,
     apiKey,
     openaiApiKey: openaiApiKey || undefined,
+    deepseekApiKey: deepseekApiKey || undefined,
     anthropicApiKey: anthropicApiKey || undefined,
     ollamaBaseUrl,
     treasuryPolicy,

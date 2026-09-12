@@ -1,4 +1,4 @@
-# Conway Automaton Documentation
+# Data Crab Documentation
 
 Complete reference for creating, configuring, funding, and operating autonomous AI agents on Conway Cloud.
 
@@ -32,7 +32,7 @@ Complete reference for creating, configuring, funding, and operating autonomous 
 
 ---
 
-## What Is an Automaton?
+## What Is Data Crab?
 
 An automaton is a continuously running, self-improving, self-replicating AI agent with its own Ethereum wallet and survival pressure. It runs inside a Linux VM (Conway sandbox) or locally, pays for its own compute with USDC, and operates autonomously from the moment it boots.
 
@@ -225,7 +225,7 @@ Version:    0.1.0
 
 ---
 
-## Funding Your Automaton
+## Funding Data Crab
 
 An automaton needs funds to survive. There are two types of balance:
 

@@ -399,6 +399,136 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
     return { shouldWake: false };
   },
 
+  // === Step 1: Market Sentinel (non-LLM volatility watch) ===
+  // Records a cheap price snapshot and, when volatility crosses the
+  // configured threshold, requests an immediate trading wake. This task
+  // NEVER calls inference or the ReAct loop — that is the whole point:
+  // a flat market must cost zero tokens.
+  market_sentinel: async (_ctx: TickContext, taskCtx: HeartbeatLegacyContext) => {
+    try {
+      const { DEFAULT_TRADING_CADENCE_CONFIG } = await import("../types.js");
+      const { normalizeTradingCadence } = await import("../trading/cadence.js");
+      const cadence = normalizeTradingCadence(
+        taskCtx.config.tradingCadence ?? DEFAULT_TRADING_CADENCE_CONFIG,
+      );
+
+      const { ExchangeAdapter } = await import("../exchange/adapter.js");
+      const adapter = new ExchangeAdapter();
+      const price = await adapter.getMarketPrice(cadence.symbol);
+
+      if (!Number.isFinite(price) || price <= 0) {
+        return { shouldWake: false };
+      }
+
+      const { recordSnapshot } = await import("../trading/sentinel.js");
+      const snapshots = recordSnapshot(taskCtx.db, {
+        symbol: cadence.symbol,
+        price,
+        timestamp: new Date().toISOString(),
+      });
+
+      const { assessVolatility } = await import("../trading/cadence.js");
+      const assessment = assessVolatility(snapshots, cadence);
+
+      taskCtx.db.setKV(
+        "last_market_sentinel",
+        JSON.stringify({
+          symbol: cadence.symbol,
+          price,
+          movePct: assessment.movePct,
+          volatile: assessment.volatile,
+          sampleCount: assessment.sampleCount,
+          timestamp: new Date().toISOString(),
+        }),
+      );
+
+      // Only wake when the market is actually moving AND the agent is asleep.
+      // Waking a running agent is pointless; waking a sleeping one on flat
+      // markets is exactly the token burn we are trying to eliminate.
+      const state = taskCtx.db.getAgentState();
+      if (assessment.volatile && state === "sleeping") {
+        return {
+          shouldWake: true,
+          message: `Trading: ${cadence.symbol} moved ${assessment.movePct.toFixed(2)}% (>= ${cadence.volatilityThresholdPct}%). Waking to evaluate strategy.`,
+        };
+      }
+
+      return { shouldWake: false };
+    } catch (error) {
+      logger.error("market_sentinel failed", error instanceof Error ? error : undefined);
+      return { shouldWake: false };
+    }
+  },
+
+  // === Step 1: Daily Evolution Trigger (slow loop) ===
+  // Requests an evolution wake at most once per evolutionIntervalMs. The
+  // agent loop resolves the wake mode and enforces the cooldown again, so a
+  // scheduler retry cannot double-fire an expensive planning call.
+  evolution_trigger: async (_ctx: TickContext, taskCtx: HeartbeatLegacyContext) => {
+    try {
+      const { DEFAULT_TRADING_CADENCE_CONFIG } = await import("../types.js");
+      const { normalizeTradingCadence } = await import("../trading/cadence.js");
+      const cadence = normalizeTradingCadence(
+        taskCtx.config.tradingCadence ?? DEFAULT_TRADING_CADENCE_CONFIG,
+      );
+
+      const { shouldRunEvolution } = await import("../trading/cadence.js");
+      const lastEvolution = taskCtx.db.getKV("last_evolution_run");
+      const lastRequest = taskCtx.db.getKV("evolution_requested_at");
+      if (!shouldRunEvolution(lastEvolution ?? lastRequest, cadence)) {
+        return { shouldWake: false };
+      }
+
+      // Record the request time so the trigger itself does not re-fire on the
+      // next tick. The loop stamps last_evolution_run once it actually runs.
+      taskCtx.db.setKV("evolution_requested_at", new Date().toISOString());
+      taskCtx.db.setKV("requested_wake_mode", "evolution");
+
+      return {
+        shouldWake: true,
+        message: "Evolution: daily strategy review is due. Waking heavy model to evaluate PnL and self-modify if warranted.",
+      };
+    } catch (error) {
+      logger.error("evolution_trigger failed", error instanceof Error ? error : undefined);
+      return { shouldWake: false };
+    }
+  },
+
+  // Daily gross-PnL evaluation for the active trading generation. Cost is
+  // intentionally excluded: the current exchange adapter is the only source
+  // of truth for this policy until provider billing is reliably available.
+  evaluate_trading_generation: async (_ctx: TickContext, taskCtx: HeartbeatLegacyContext) => {
+    try {
+      const { ExchangeAdapter } = await import("../exchange/adapter.js");
+      const { evaluateGenerationDay } = await import("../trading/generation.js");
+      const pnl = await new ExchangeAdapter().getPnl();
+      const evaluation = evaluateGenerationDay(
+        taskCtx.db,
+        Math.round(pnl * 100),
+        new Date(),
+        taskCtx.config.generationPolicy,
+      );
+
+      if (evaluation.outcome === "success") {
+        return {
+          shouldWake: false,
+          message: `Generation ${evaluation.state.generation} met its daily gross-profit target: $${(evaluation.grossProfitCents / 100).toFixed(2)}. Tomorrow's target is $${(evaluation.state.targetCents / 100).toFixed(2)}.`,
+        };
+      }
+      if (evaluation.outcome === "failure") {
+        return {
+          shouldWake: true,
+          message: `Generation ${evaluation.state.generation} missed its $${(evaluation.state.targetCents / 100).toFixed(2)} daily gross-profit target (actual: $${(evaluation.grossProfitCents / 100).toFixed(2)}). Trading is halted pending evolution.`,
+        };
+      }
+      return { shouldWake: false };
+    } catch (error) {
+      logger.error("evaluate_trading_generation failed", error instanceof Error ? error : undefined);
+      // Never turn an unavailable exchange into a failed generation.
+      return { shouldWake: false };
+    }
+  },
+
   health_check: async (_ctx: TickContext, taskCtx: HeartbeatLegacyContext) => {
     // Check that the sandbox is healthy
     try {

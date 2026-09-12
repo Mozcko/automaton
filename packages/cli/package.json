@@ -1,7 +1,7 @@
 {
   "name": "@conway/automaton-cli",
   "version": "0.2.0",
-  "description": "Conway Automaton - Creator CLI",
+  "description": "Data Crab - Operator CLI",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

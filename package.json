@@ -1,7 +1,7 @@
 {
   "name": "@conway/automaton",
   "version": "0.2.1",
-  "description": "Conway Automaton - Sovereign AI Agent Runtime",
+  "description": "Data Crab - Autonomous Trading Agent Runtime",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

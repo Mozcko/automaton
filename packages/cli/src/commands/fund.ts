@@ -21,7 +21,7 @@ if (!amount) {
 
 const config = loadConfig();
 if (!config) {
-  console.log("No automaton configuration found.");
+  console.log("No Data Crab configuration found.");
   process.exit(1);
 }
 

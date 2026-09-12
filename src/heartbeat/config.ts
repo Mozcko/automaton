@@ -55,6 +55,30 @@ const DEFAULT_HEARTBEAT_CONFIG: HeartbeatConfig = {
       task: "check_social_inbox",
       enabled: true,
     },
+    {
+      // Step 1: cheap non-LLM price watch. Runs every minute; only wakes the
+      // agent when volatility crosses the configured threshold.
+      name: "market_sentinel",
+      schedule: "* * * * *",
+      task: "market_sentinel",
+      enabled: true,
+    },
+    {
+      // Step 1: daily slow-loop trigger. Runs hourly but self-gates to once
+      // per evolutionIntervalMs (default 24h) via last_evolution_run.
+      name: "evolution_trigger",
+      schedule: "0 * * * *",
+      task: "evolution_trigger",
+      enabled: true,
+    },
+    {
+      // Evaluates completed UTC days only; each task invocation is otherwise
+      // a cheap no-op after reading the exchange PnL.
+      name: "evaluate_trading_generation",
+      schedule: "0 * * * *",
+      task: "evaluate_trading_generation",
+      enabled: true,
+    },
   ],
   defaultIntervalMs: 60_000,
   lowComputeMultiplier: 4,

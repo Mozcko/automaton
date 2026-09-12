@@ -227,19 +227,17 @@ describe("InferenceRouter", () => {
     it("returns correct model for normal/agent_turn", () => {
       const model = router.selectModel("normal", "agent_turn");
       expect(model).not.toBeNull();
-      expect(model!.modelId).toBe("gpt-5.2");
+      expect(model!.modelId).toBe("deepseek-coder");
     });
 
-    it("returns cheaper model for low_compute tier", () => {
+    it("fails closed at low_compute when the local model is unavailable", () => {
       const model = router.selectModel("low_compute", "agent_turn");
-      expect(model).not.toBeNull();
-      expect(model!.modelId).toBe("gpt-5-mini");
+      expect(model).toBeNull();
     });
 
-    it("returns minimal model for critical tier", () => {
+    it("fails closed at critical when the local model is unavailable", () => {
       const model = router.selectModel("critical", "agent_turn");
-      expect(model).not.toBeNull();
-      expect(model!.modelId).toBe("gpt-5-mini");
+      expect(model).toBeNull();
     });
 
     it("returns null for dead tier", () => {
@@ -252,11 +250,10 @@ describe("InferenceRouter", () => {
       expect(model).toBeNull();
     });
 
-    it("skips disabled models and picks next candidate", () => {
-      registry.setEnabled("gpt-5.2", false);
+    it("skips disabled models and returns null without an eligible fallback", () => {
+      registry.setEnabled("deepseek-coder", false);
       const model = router.selectModel("normal", "agent_turn");
-      expect(model).not.toBeNull();
-      expect(model!.modelId).toBe("gpt-5-mini");
+      expect(model).toBeNull();
     });
   });
 
@@ -279,13 +276,13 @@ describe("InferenceRouter", () => {
       );
 
       expect(result.content).toBe("Hello!");
-      expect(result.model).toBe("gpt-5.2");
+      expect(result.model).toBe("deepseek-coder");
       expect(result.finishReason).toBe("stop");
 
       // Verify cost was recorded
       const costs = inferenceGetSessionCosts(db, "test-session");
       expect(costs.length).toBe(1);
-      expect(costs[0].model).toBe("gpt-5.2");
+      expect(costs[0].model).toBe("deepseek-coder");
     });
 
     it("computes actualCostCents accurately from token usage", async () => {
@@ -385,6 +382,124 @@ describe("InferenceRouter", () => {
 
       expect(result.finishReason).toBe("budget_exceeded");
       expect(result.content).toContain("Session budget exceeded");
+    });
+
+    it("honors preferredModel over routing-matrix selection", async () => {
+      const now = new Date().toISOString();
+      registry.upsert({
+        modelId: "llama3.1:latest",
+        provider: "ollama",
+        displayName: "Llama 3.1 8B",
+        tierMinimum: "critical",
+        costPer1kInput: 0,
+        costPer1kOutput: 0,
+        maxTokens: 8192,
+        contextWindow: 128000,
+        supportsTools: true,
+        supportsVision: false,
+        parameterStyle: "max_tokens",
+        enabled: true,
+        lastSeen: now,
+        createdAt: now,
+        updatedAt: now,
+      });
+      let usedModel: string | undefined;
+      const mockChat = async (_msgs: any[], opts: any) => {
+        usedModel = opts.model;
+        return {
+          message: { content: "ok", role: "assistant" },
+          usage: { promptTokens: 10, completionTokens: 5 },
+          finishReason: "stop",
+        };
+      };
+
+      // Force the cheap local model even at normal tier (fast trading loop).
+      const result = await router.route(
+        {
+          messages: [{ role: "user", content: "trade?" }],
+          taskType: "agent_turn",
+          tier: "normal",
+          sessionId: "pref-session",
+          preferredModel: "llama3.1:latest",
+        },
+        mockChat,
+      );
+
+      expect(result.model).toBe("llama3.1:latest");
+      expect(usedModel).toBe("llama3.1:latest");
+      // Local model is free → zero cost recorded.
+      expect(result.costCents).toBe(0);
+    });
+
+    it("falls back to routing matrix when preferredModel is unknown", async () => {
+      const mockChat = async (_msgs: any[], _opts: any) => ({
+        message: { content: "ok", role: "assistant" },
+        usage: { promptTokens: 10, completionTokens: 5 },
+        finishReason: "stop",
+      });
+
+      const result = await router.route(
+        {
+          messages: [{ role: "user", content: "hi" }],
+          taskType: "agent_turn",
+          tier: "normal",
+          sessionId: "pref-fallback",
+          preferredModel: "does-not-exist",
+        },
+        mockChat,
+      );
+
+      // Falls back to whatever the matrix selects for normal/agent_turn.
+      expect(result.model).not.toBe("does-not-exist");
+      expect(result.model).not.toBe("none");
+    });
+
+    it("does not fall back when preferredModel is required", async () => {
+      let called = false;
+      const result = await router.route(
+        {
+          messages: [{ role: "user", content: "trade?" }],
+          taskType: "agent_turn",
+          tier: "normal",
+          sessionId: "strict-preference",
+          preferredModel: "missing-cheap-model",
+          requirePreferredModel: true,
+        },
+        async () => {
+          called = true;
+          return { message: { content: "" }, usage: {}, finishReason: "stop" };
+        },
+      );
+
+      expect(called).toBe(false);
+      expect(result.model).toBe("none");
+      expect(result.costCents).toBe(0);
+    });
+
+    it("accepts a configured newer OpenAI model that is not in the static registry", async () => {
+      let usedModel = "";
+      const result = await router.route(
+        {
+          messages: [{ role: "user", content: "trade?" }],
+          taskType: "agent_turn",
+          tier: "normal",
+          sessionId: "configured-model",
+          preferredModel: "gpt-6",
+          requirePreferredModel: true,
+        },
+        async (_messages, options) => {
+          usedModel = options.model;
+          return {
+            message: { content: "ok", role: "assistant" },
+            usage: { promptTokens: 1, completionTokens: 1 },
+            finishReason: "stop",
+          };
+        },
+      );
+
+      expect(usedModel).toBe("gpt-6");
+      expect(result.model).toBe("gpt-6");
+      expect(result.provider).toBe("openai");
     });
 
     it("passes abort signal to inference function", async () => {
@@ -741,15 +856,23 @@ describe("Static Model Baseline", () => {
     expect(ids).toContain("gpt-5.3");
   });
 
-  it("all models have positive pricing", () => {
+  it("all models have non-negative pricing (local/Ollama models are free)", () => {
     for (const model of STATIC_MODEL_BASELINE) {
-      expect(model.costPer1kInput).toBeGreaterThan(0);
-      expect(model.costPer1kOutput).toBeGreaterThan(0);
+      expect(model.costPer1kInput).toBeGreaterThanOrEqual(0);
+      expect(model.costPer1kOutput).toBeGreaterThanOrEqual(0);
+      // Local (Ollama) models must be free so they are never billed remotely.
+      if (model.provider === "ollama") {
+        expect(model.costPer1kInput).toBe(0);
+        expect(model.costPer1kOutput).toBe(0);
+      } else {
+        expect(model.costPer1kInput).toBeGreaterThan(0);
+        expect(model.costPer1kOutput).toBeGreaterThan(0);
+      }
     }
   });
 
   it("all models have valid provider", () => {
-    const validProviders = ["openai", "anthropic", "conway", "other"];
+    const validProviders = ["openai", "anthropic", "conway", "other", "deepseek", "ollama", "nim"];
     for (const model of STATIC_MODEL_BASELINE) {
       expect(validProviders).toContain(model.provider);
     }
@@ -954,9 +1077,14 @@ describe("Inference DB Helpers", () => {
 
 describe("DEFAULT_MODEL_STRATEGY_CONFIG", () => {
   it("has sensible defaults", () => {
-    expect(DEFAULT_MODEL_STRATEGY_CONFIG.inferenceModel).toBe("gpt-5.2");
-    expect(DEFAULT_MODEL_STRATEGY_CONFIG.lowComputeModel).toBe("gpt-5-mini");
-    expect(DEFAULT_MODEL_STRATEGY_CONFIG.criticalModel).toBe("gpt-5-mini");
+    expect(DEFAULT_MODEL_STRATEGY_CONFIG.inferenceModel).toBe("deepseek-coder");
+    expect(DEFAULT_MODEL_STRATEGY_CONFIG.lowComputeModel).toBe("llama3.1:latest");
+    expect(DEFAULT_MODEL_STRATEGY_CONFIG.criticalModel).toBe("llama3.1:latest");
+    expect(DEFAULT_MODEL_STRATEGY_CONFIG.fastTradingModel).toBe("deepseek-chat");
+    expect(DEFAULT_MODEL_STRATEGY_CONFIG.fastTradingFallbackModel).toBe("gpt-4.1-mini");
+    expect(DEFAULT_MODEL_STRATEGY_CONFIG.slowEvolutionModel).toBe("deepseek-coder");
+    expect(DEFAULT_MODEL_STRATEGY_CONFIG.slowEvolutionFallbackModel).toBe("gpt-4.1");
+    expect(DEFAULT_MODEL_STRATEGY_CONFIG.fastTradingMaxTokens).toBe(1024);
     expect(DEFAULT_MODEL_STRATEGY_CONFIG.enableModelFallback).toBe(true);
     expect(DEFAULT_MODEL_STRATEGY_CONFIG.hourlyBudgetCents).toBe(0); // no limit
     expect(DEFAULT_MODEL_STRATEGY_CONFIG.sessionBudgetCents).toBe(0); // no limit
