@@ -1,5 +1,31 @@
 import * as ccxt from "ccxt";
 
+export const EXCHANGE_PNL_BASELINE_KV = "exchange_pnl_baseline_usd";
+
+interface PnlStateStore {
+  getKV(key: string): string | undefined;
+  setKV(key: string, value: string): void;
+}
+
+/**
+ * INITIAL_ALLOCATION_USD is a trading budget, not a PnL baseline. Persist the
+ * first successfully valued live exchange balance so a pre-funded deployment
+ * starts at zero PnL. PNL_BASELINE_USD supports an explicit historical start.
+ */
+export function getPnlFromEquity(equityUsd: number, state?: PnlStateStore): number {
+  if (!Number.isFinite(equityUsd) || equityUsd <= 0 || !state) return 0;
+
+  const stored = Number(state.getKV(EXCHANGE_PNL_BASELINE_KV));
+  if (Number.isFinite(stored) && stored > 0) return equityUsd - stored;
+
+  const configured = Number(process.env.PNL_BASELINE_USD);
+  const baseline = Number.isFinite(configured) && configured > 0
+    ? configured
+    : equityUsd;
+  state.setKV(EXCHANGE_PNL_BASELINE_KV, String(baseline));
+  return equityUsd - baseline;
+}
+
 export class ExchangeAdapter {
   private exchange: ccxt.Exchange;
 
@@ -24,7 +50,7 @@ export class ExchangeAdapter {
     return this.exchange.fetchBalance();
   }
 
-  async getPnl(): Promise<number> {
+  async getPnl(state?: PnlStateStore): Promise<number> {
     // Stub implementation. To calculate real PnL, we need historical deposits/withdrawals 
     // or calculate based on open positions and average entry price vs current market price.
     // For this demonstration, we'll return a stub value or calculate a simple one.
@@ -69,8 +95,7 @@ export class ExchangeAdapter {
         return 0;
       }
       
-      // Calculate PnL based on $50 allocated capital
-      const initial = Number(process.env.INITIAL_ALLOCATION_USD) || 50; return equityUsdt - initial;
+       return getPnlFromEquity(equityUsdt, state);
     } catch (e) {
       console.warn("Could not fetch balance for PnL calculation, returning 0", e instanceof Error ? e.message : String(e));
       return 0;
