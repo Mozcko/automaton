@@ -268,7 +268,8 @@ async function run(): Promise<void> {
   db.setIdentity("address", chainIdentity.address);
   db.setIdentity("creator", config.creatorAddress);
   db.setIdentity("chainType", resolvedChainType);
-  db.setIdentity("sandbox", config.sandboxId);
+  // Offline/local deployments may not have a Conway sandbox ID.
+  db.setIdentity("sandbox", config.sandboxId || "");
   const storedAutomatonId = db.getIdentity("automatonId");
   const automatonId = storedAutomatonId || config.sandboxId || randomUUID();
   if (!storedAutomatonId) {
