@@ -518,7 +518,7 @@ Use native tool calls only.`;
       try {
         const { ExchangeAdapter } = await import("../exchange/adapter.js");
         const adapter = new ExchangeAdapter();
-        const pnl = await adapter.getPnl();
+        const pnl = await adapter.getPnl(db);
         logger.info(`Current Exchange PnL: $${pnl}`);
         
         if (pnl <= -5) {

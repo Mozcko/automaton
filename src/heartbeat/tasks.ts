@@ -501,7 +501,7 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
     try {
       const { ExchangeAdapter } = await import("../exchange/adapter.js");
       const { evaluateGenerationDay } = await import("../trading/generation.js");
-      const pnl = await new ExchangeAdapter().getPnl();
+      const pnl = await new ExchangeAdapter().getPnl(taskCtx.db);
       const evaluation = evaluateGenerationDay(
         taskCtx.db,
         Math.round(pnl * 100),

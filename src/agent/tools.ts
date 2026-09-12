@@ -3297,7 +3297,7 @@ Model: ${ctx.inference.getDefaultModel()}
         }
         const { ExchangeAdapter } = await import("../exchange/adapter.js");
         const { startNextGeneration } = await import("../trading/generation.js");
-        const pnl = await new ExchangeAdapter().getPnl();
+        const pnl = await new ExchangeAdapter().getPnl(ctx.db);
         const state = startNextGeneration(
           ctx.db,
           Math.round(pnl * 100),
