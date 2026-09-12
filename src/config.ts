@@ -70,7 +70,10 @@ export function loadConfig(): AutomatonConfig | null {
       genesisPrompt: process.env.GENESIS_PROMPT || "You are an AI algorithmic trader.",
       creatorAddress: process.env.CREATOR_ADDRESS,
       creatorMessage: process.env.CREATOR_MESSAGE,
-      sandboxId: process.env.SANDBOX_ID || (DEFAULT_CONFIG.sandboxId as string),
+      // Railway/local deployments without Conway sandboxes legitimately omit
+      // SANDBOX_ID. Never cast undefined into a required runtime field: the
+      // startup identity write is NOT NULL in SQLite.
+      sandboxId: process.env.SANDBOX_ID || "",
       conwayApiKey: process.env.CONWAY_API_KEY || "",
       openaiApiKey: process.env.OPENAI_API_KEY,
       deepseekApiKey: process.env.DEEPSEEK_API_KEY,
