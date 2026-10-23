@@ -132,6 +132,7 @@ export class InferenceRouter {
       maxTokens,
       tools: tools,
       fallbackModels: request.fallbackModels,
+      toolChoice: request.toolChoice,
     };
 
     // 6. Call inference with timeout

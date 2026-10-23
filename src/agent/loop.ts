@@ -751,6 +751,9 @@ Use native tool calls only.`;
           fallbackModels,
           requirePreferredModel: !isEvolution,
           maxTokens: wakeMaxTokens,
+          // Routine market checks must invoke a tool. Local models otherwise
+          // often emit text such as "analyze_market BTCMXN" without acting.
+          toolChoice: !isEvolution ? "required" : "auto",
         },
         (msgs, opts) => inference.chat(msgs, { ...opts, tools: inferenceTools }),
       );

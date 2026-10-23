@@ -22,7 +22,8 @@ export function loadConfig(): AutomatonConfig | null {
     dotenv.config({ path: configPath });
   }
 
-  if (!process.env.AUTOMATON_NAME || !process.env.CREATOR_ADDRESS) {
+  const localMode = process.env.LOCAL_MODE === "true";
+  if (!process.env.AUTOMATON_NAME || (!process.env.CREATOR_ADDRESS && !localMode)) {
     return null;
   }
 
@@ -68,7 +69,9 @@ export function loadConfig(): AutomatonConfig | null {
       ...DEFAULT_CONFIG,
       name: process.env.AUTOMATON_NAME,
       genesisPrompt: process.env.GENESIS_PROMPT || "You are an AI algorithmic trader.",
-      creatorAddress: process.env.CREATOR_ADDRESS,
+      // Local mode has no on-chain owner/registration. A durable label is
+      // sufficient for local authority checks and SQLite identity storage.
+      creatorAddress: process.env.CREATOR_ADDRESS || "local-operator",
       creatorMessage: process.env.CREATOR_MESSAGE,
       // Railway/local deployments without Conway sandboxes legitimately omit
       // SANDBOX_ID. Never cast undefined into a required runtime field: the
@@ -84,6 +87,7 @@ export function loadConfig(): AutomatonConfig | null {
       inferenceModel: process.env.INFERENCE_MODEL || (DEFAULT_CONFIG.inferenceModel as string),
       walletAddress: process.env.WALLET_ADDRESS || "",
       registeredWithConway: process.env.REGISTERED_WITH_CONWAY === "true",
+      localMode,
       chainType: (process.env.CHAIN_TYPE as ChainType) || "evm",
       treasuryPolicy,
       modelStrategy,

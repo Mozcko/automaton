@@ -111,7 +111,7 @@ export function createInferenceClient(
 
     if (tools && tools.length > 0) {
       body.tools = tools;
-      body.tool_choice = "auto";
+      body.tool_choice = opts?.toolChoice ?? "auto";
     }
 
     if (backend === "anthropic") {

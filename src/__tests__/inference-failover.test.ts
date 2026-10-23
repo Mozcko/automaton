@@ -45,4 +45,40 @@ describe("main-loop inference failover", () => {
     expect(fetchMock.mock.calls[0][0]).toContain("api.deepseek.com");
     expect(fetchMock.mock.calls[1][0]).toContain("api.openai.com");
   });
+
+  it("forwards required tool choice to an OpenAI-compatible local model", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        id: "local-response",
+        model: "qwen2.5-coder:32b",
+        choices: [{ message: { role: "assistant", content: "" }, finish_reason: "tool_calls" }],
+        usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createInferenceClient({
+      apiUrl: "https://api.conway.tech",
+      apiKey: "conway-key",
+      defaultModel: "qwen2.5-coder:32b",
+      maxTokens: 128,
+      ollamaBaseUrl: "http://127.0.0.1:11434",
+      getModelProvider: () => "ollama",
+    });
+
+    await client.chat([{ role: "user", content: "trade?" }], {
+      tools: [{
+        type: "function",
+        function: {
+          name: "analyze_market",
+          description: "Analyze a market",
+          parameters: { type: "object", properties: {} },
+        },
+      }],
+      toolChoice: "required",
+    });
+
+    const request = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(request.tool_choice).toBe("required");
+  });
 });

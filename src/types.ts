@@ -46,6 +46,8 @@ export interface AutomatonConfig {
   creatorMessage?: string;
   creatorAddress: string;
   registeredWithConway: boolean;
+  /** Local-only mode skips Conway registration and permits a mock creator identity. */
+  localMode?: boolean;
   sandboxId: string;
   conwayApiUrl: string;
   conwayApiKey: string;
@@ -347,6 +349,7 @@ export interface InferenceOptions {
   maxTokens?: number;
   temperature?: number;
   tools?: InferenceToolDefinition[];
+  toolChoice?: "auto" | "required";
   stream?: boolean;
 }
 
@@ -1201,6 +1204,7 @@ export interface InferenceRequest {
   preferredModel?: string;
   /** Ordered model alternatives used after a retryable/quota/context failure. */
   fallbackModels?: string[];
+  toolChoice?: "auto" | "required";
   /** Return without inference instead of falling back when preferredModel is unavailable. */
   requirePreferredModel?: boolean;
 }
