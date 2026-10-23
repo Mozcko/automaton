@@ -1,5 +1,7 @@
 # Data Crab: Autonomous Trading Research Runtime
 
+> **Archivado.** Este fork ya no se mantiene. El sucesor es [Mozcko/data-crab](https://github.com/Mozcko/data-crab), un bot algorítmico en Python sin LLM en las decisiones. El trabajo sin terminar quedó en la rama `wip/local-mode`.
+
 *The first AI that can earn its own existence, replicate, and evolve — without needing a human.*
 
 ---
